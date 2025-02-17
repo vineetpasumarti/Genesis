@@ -3,7 +3,7 @@ import os
 import pickle
 
 import torch
-from waypoint_env_racing_gates import HoverEnv
+from waypoint_env_racing_eight import HoverEnv
 from rsl_rl.runners import OnPolicyRunner
 
 import genesis as gs
@@ -29,9 +29,9 @@ def main():
     # set the max FPS for visualization
     env_cfg["max_visualize_FPS"] = 60
     # increase the episode length to allow time for reaching all targets
-    env_cfg["episode_length_s"] = 30.0  # defaults to 15.0s even without this line
-    # increase target threshold
-    env_cfg["at_target_threshold"] = 0.1
+    env_cfg["episode_length_s"] = 45.0  # defaults to 15.0s even without this line
+    # # increase threshold for reaching targets
+    # env_cfg["at_target_threshold"] = 0.7
 
     env = HoverEnv(
         num_envs=1,

@@ -3,7 +3,7 @@ import os
 import pickle
 import shutil
 
-from waypoint_env_racing_gates import HoverEnv
+from waypoint_env_racing_eight import HoverEnv
 from rsl_rl.runners import OnPolicyRunner
 
 import genesis as gs
@@ -62,14 +62,14 @@ def get_cfgs():
         "termination_if_roll_greater_than": 180,  # degree
         "termination_if_pitch_greater_than": 180,
         "termination_if_close_to_ground": 0.1,
-        "termination_if_x_greater_than": 30,
-        "termination_if_y_greater_than": 30,
-        "termination_if_z_greater_than": 30,
+        "termination_if_x_greater_than": 50.0,
+        "termination_if_y_greater_than": 50.0,
+        "termination_if_z_greater_than": 50.0,
         # base pose
-        "base_init_pos": [0.0, 0.0, 1.0],
+        "base_init_pos": [-3.0, -1.6, 2.5],
         "base_init_quat": [1.0, 0.0, 0.0, 0.0],
         "episode_length_s": 15.0,
-        "at_target_threshold": 0.1,
+        "at_target_threshold": 0.2,
         "resampling_time_s": 3.0,
         "simulate_action_latency": True,
         "clip_actions": 1.0,
@@ -104,24 +104,40 @@ def get_cfgs():
             "commands_lrg": -0.0005,
             "commands_diff": -0.0002,
             "pass": 1.0,
-            "crash": 1.0,
-            "perception": 0.025,
+            "crash": 3.0,
+            # "perception": 0.025,
         },
     }
 
+    # traj 4 (figure 8)
     command_cfg = {
         "num_commands": 3,
         "target_locations": [
-            [-1.1, -1.6, 3.6],
-            [9.2, 6.6, 1.0],
-            [9.2, -4, 1.2],
-            [-4.5, -6, 3.5],
-            [-4.5, -6, 0.8],
-            [4.75, -0.9, 1.2],
-            [-2.8, 6.8, 1.2],
-            [1.1, -1.6, 3.6]
+            [0.0, 0.0, 1.0],
+            [10.0, 5.0, 1.0],
+            [10.0, -5.0, 1.0],
+            [0.0, 0.0, 1.0],
+            [-10.0, 5.0, 1.0],
+            [-10.0, -5.0, 1.0],
+            [0.0, 0.0, 1.0]
         ]
     }
+
+
+    # # traj 1
+    # command_cfg = {
+    #     "num_commands": 3,
+    #     "target_locations": [
+    #         [-1.1, -1.6, 3.6],
+    #         [9.2, 6.6, 1.0],
+    #         [9.2, -4, 1.2],
+    #         [-4.5, -6, 3.5],
+    #         [-4.5, -6, 0.8],
+    #         [4.75, -0.9, 1.2],
+    #         [-2.8, 6.8, 1.2],
+    #         [1.1, -1.6, 3.6]
+    #     ]
+    # }
 
     # command_cfg = {
     #     "num_commands": 3,
