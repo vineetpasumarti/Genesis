@@ -63,29 +63,29 @@ class HoverEnv:
         # add plane
         self.scene.add_entity(gs.morphs.Plane())
 
-        # add gates
-        for i in range(self.track.NumOfGates):
-            gate_orientation = self.track.get_gate_orientation(i)
-            gate_T = np.array(gate_orientation[0]).flatten()  # Convert DM to numpy array
-            gate_quat = Quaternion(matrix=np.column_stack([gate_T, *gate_orientation[1:]])).elements
-
-            self.scene.add_entity(
-                morph=gs.morphs.Mesh(
-                    file="meshes/gate.obj",
-                    scale=0.4,
-                    pos=self.track.x_gates[i],
-                    quat=tuple(gate_quat.tolist()),
-                    fixed=True,
-                    collision=False,
-                ),
-            ),
+        # # add gates
+        # for i in range(self.track.NumOfGates):
+        #     gate_orientation = self.track.get_gate_orientation(i)
+        #     gate_T = np.array(gate_orientation[0]).flatten()  # Convert DM to numpy array
+        #     gate_quat = Quaternion(matrix=np.column_stack([gate_T, *gate_orientation[1:]])).elements
+        #
+        #     self.scene.add_entity(
+        #         morph=gs.morphs.Mesh(
+        #             file="meshes/gate.obj",
+        #             scale=0.4,
+        #             pos=self.track.x_gates[i],
+        #             quat=tuple(gate_quat.tolist()),
+        #             fixed=True,
+        #             collision=False,
+        #         ),
+        #     ),
 
         # add target
         if self.env_cfg["visualize_target"]:
             self.target = self.scene.add_entity(
                 morph=gs.morphs.Mesh(
                     file="meshes/sphere.obj",
-                    scale=0.35,
+                    scale=0.05,
                     fixed=True,
                     collision=False,
                 ),
@@ -181,8 +181,14 @@ class HoverEnv:
         return at_target
 
     def step(self, actions):
-        self.actions = torch.clip(actions, -self.env_cfg["clip_actions"], self.env_cfg["clip_actions"])
+        self.actions = torch.clip(actions, min=-1.0, max=1.0)
         exec_actions = self.actions
+
+        # action sanity check
+        if torch.isnan(self.actions).any():
+            print("NaN detected in actions! Resetting environments")
+            self.reset_idx(torch.arange(self.num_envs, device=self.device))
+            return self.obs_buf, None, self.rew_buf, self.reset_buf, self.extras
 
         # 14468 is hover rpm
         self.drone.set_propellels_rpm((1 + exec_actions * 0.8) * 14468.429183500699)
@@ -201,6 +207,47 @@ class HoverEnv:
         inv_base_quat = inv_quat(self.base_quat)
         self.base_lin_vel[:] = transform_by_quat(self.drone.get_vel(), inv_base_quat)
         self.base_ang_vel[:] = transform_by_quat(self.drone.get_ang(), inv_base_quat)
+
+        # compute observations
+        # Modified observation buffer
+        self.obs_buf = torch.cat([
+            torch.clip(self.rel_pos * self.obs_scales["rel_pos"], min=-1, max=1),
+            F.normalize(self.base_quat, dim=1),  # Critical fix
+            torch.clip(self.base_lin_vel * self.obs_scales["lin_vel"], min=-1, max=1),
+            torch.clip(self.base_ang_vel * self.obs_scales["ang_vel"], min=-1, max=1),
+            torch.clip(self.last_actions, min=-1, max=1)
+        ], axis=-1)
+
+        # pre-policy NaN check
+        nan_mask = torch.isnan(self.obs_buf).any(dim=1)
+        if nan_mask.any():
+            print(f"Pre-policy NaN detected in {nan_mask.sum()} envs. Resetting...")
+            self.reset_idx(nan_mask.nonzero(as_tuple=False).flatten())
+
+            # ===== Critical: Full State Update After Reset =====
+            self.base_pos[:] = self.drone.get_pos()  # Force refresh
+            self.base_quat[:] = self.drone.get_quat()
+            self.rel_pos = self.commands - self.base_pos
+
+            # Recompute ALL observations after reset
+            # safe quat normalization
+            quat_norms = torch.norm(self.base_quat, dim=1, keepdim=True).clamp(min=1e-6)
+            safe_quat = torch.where(
+                quat_norms < 1e-6,
+                torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device),
+                self.base_quat / quat_norms
+            )
+
+            self.obs_buf = torch.cat([
+                torch.clip(self.rel_pos * self.obs_scales["rel_pos"], min=-1, max=1),
+                safe_quat,
+                torch.clip(self.base_lin_vel * self.obs_scales["lin_vel"], min=-1, max=1),
+                torch.clip(self.base_ang_vel * self.obs_scales["ang_vel"], min=-1, max=1),
+                torch.clip(self.last_actions, min=-1, max=1)
+            ], axis=-1)
+
+            # Secondary sanitization
+            self.obs_buf = torch.nan_to_num(self.obs_buf, nan=0.0)
 
         # resample commands
         envs_idx = self._at_target()
@@ -233,17 +280,6 @@ class HoverEnv:
             self.rew_buf += rew
             self.episode_sums[name] += rew
 
-        # compute observations
-        self.obs_buf = torch.cat(
-            [
-                torch.clip(self.rel_pos * self.obs_scales["rel_pos"], -1, 1),
-                self.base_quat,
-                torch.clip(self.base_lin_vel * self.obs_scales["lin_vel"], -1, 1),
-                torch.clip(self.base_ang_vel * self.obs_scales["ang_vel"], -1, 1),
-                self.last_actions,
-            ],
-            axis=-1,
-        )
 
         self.last_actions[:] = self.actions[:]
 
@@ -326,7 +362,7 @@ class HoverEnv:
 
         # Angle calculation
         cos_theta = (camera_forward_body * gate_dir_body).sum(dim=1)
-        angle = torch.acos(torch.clamp(cos_theta, min=-1.0+1e-6, max=1.0-1e-6))
+        angle = torch.acos(torch.clamp(cos_theta, min=-0.999999, max=0.999999))
         return torch.exp(-(angle ** 4))
 
     # def _reward_target(self):

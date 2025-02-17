@@ -29,7 +29,9 @@ def main():
     # set the max FPS for visualization
     env_cfg["max_visualize_FPS"] = 60
     # increase the episode length to allow time for reaching all targets
-    env_cfg["episode_length_s"] = 15.0  # defaults to 15.0s even without this line
+    env_cfg["episode_length_s"] = 30.0  # defaults to 15.0s even without this line
+    # increase target threshold
+    env_cfg["at_target_threshold"] = 0.1
 
     env = HoverEnv(
         num_envs=1,

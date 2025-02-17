@@ -62,14 +62,14 @@ def get_cfgs():
         "termination_if_roll_greater_than": 180,  # degree
         "termination_if_pitch_greater_than": 180,
         "termination_if_close_to_ground": 0.1,
-        "termination_if_x_greater_than": 50.0,
-        "termination_if_y_greater_than": 50.0,
-        "termination_if_z_greater_than": 50.0,
+        "termination_if_x_greater_than": 30,
+        "termination_if_y_greater_than": 30,
+        "termination_if_z_greater_than": 30,
         # base pose
-        "base_init_pos": [-3.0, -1.6, 2.5],
+        "base_init_pos": [0.0, 0.0, 1.0],
         "base_init_quat": [1.0, 0.0, 0.0, 0.0],
         "episode_length_s": 15.0,
-        "at_target_threshold": 0.7,
+        "at_target_threshold": 0.1,
         "resampling_time_s": 3.0,
         "simulate_action_latency": True,
         "clip_actions": 1.0,
@@ -104,7 +104,7 @@ def get_cfgs():
             "commands_lrg": -0.0005,
             "commands_diff": -0.0002,
             "pass": 1.0,
-            "crash": 3.0,
+            "crash": 1.0,
             "perception": 0.025,
         },
     }
