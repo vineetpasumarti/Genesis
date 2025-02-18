@@ -2,6 +2,7 @@ import argparse
 import os
 import pickle
 import shutil
+import wandb
 
 from waypoint_env_racing_eight import HoverEnv
 from rsl_rl.runners import OnPolicyRunner
@@ -172,6 +173,9 @@ def main():
     if args.vis:
         env_cfg["visualize_target"] = True
 
+    wandb.init(project=f"{args.exp_name}",
+               sync_tensorboard=True,)
+
     env = HoverEnv(
         num_envs=args.num_envs,
         env_cfg=env_cfg,
@@ -189,6 +193,10 @@ def main():
     )
 
     runner.learn(num_learning_iterations=args.max_iterations, init_at_random_ep_len=True)
+
+    # Log model checkpoints
+    wandb.save(os.path.join(log_dir, "*.pt"))
+    wandb.save(os.path.join(log_dir, "cfgs.pkl"))
 
 
 if __name__ == "__main__":

@@ -1,10 +1,11 @@
 import argparse
 import os
 import pickle
-
+import wandb
 import torch
 from waypoint_env_racing_eight import HoverEnv
 from rsl_rl.runners import OnPolicyRunner
+import numpy as np
 
 import genesis as gs
 
@@ -17,6 +18,7 @@ def main():
     args = parser.parse_args()
 
     gs.init()
+    wandb.init(project=f"{args.exp_name}")
 
     log_dir = f"logs/{args.exp_name}"
     env_cfg, obs_cfg, reward_cfg, command_cfg, train_cfg = pickle.load(open(f"logs/{args.exp_name}/cfgs.pkl", "rb"))
@@ -63,6 +65,27 @@ def main():
                 actions = policy(obs)
                 obs, _, rews, dones, infos = env.step(actions)
 
+    if args.record:
+        env.cam.start_recording()
+
+        # Capture frames
+        frames = []
+        for _ in range(max_sim_step):
+            # Existing code
+            ...
+
+            # Capture RGB array
+            frame = env.cam.get_rgb()
+            frames.append(frame)
+
+        # Log as video
+        wandb.log({
+            "eval_video": wandb.Video(
+                np.array(frames),
+                fps=env_cfg["max_visualize_FPS"],
+                format="mp4"
+            )
+        })
 
 if __name__ == "__main__":
     main()

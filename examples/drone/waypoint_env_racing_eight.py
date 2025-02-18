@@ -7,6 +7,7 @@ from TrackModel import SplineCenterline
 from interp import spline_interpolant
 import numpy as np
 from pyquaternion import Quaternion
+import wandb
 
 
 
