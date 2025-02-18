@@ -66,10 +66,10 @@ def get_cfgs():
         "termination_if_y_greater_than": 50.0,
         "termination_if_z_greater_than": 50.0,
         # base pose
-        "base_init_pos": [-3.0, -1.6, 2.5],
+        "base_init_pos": [-1.0, -1.0, 1.0],
         "base_init_quat": [1.0, 0.0, 0.0, 0.0],
         "episode_length_s": 15.0,
-        "at_target_threshold": 0.2,
+        "at_target_threshold": 0.7,
         "resampling_time_s": 3.0,
         "simulate_action_latency": True,
         "clip_actions": 1.0,

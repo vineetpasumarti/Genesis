@@ -92,7 +92,7 @@ class RaceTrack(PythonMsg):
             case 4:
                 x = np.array([ 0.0, 10.0, 10.0,  0.0, -10.0, -10.0, 0.0]).reshape(-1,1)
                 y = np.array([ 0.0,  5.0, -5.0,  0.0,   5.0,  -5.0, 0.0]).reshape(-1,1)
-                z = np.array([10.0, 10.0, 10.0, 10.0,  10.0,  10.0, 10.0]).reshape(-1,1)
+                z = np.array([1.0, 1.0, 1.0, 1.0,  1.0,  1.0, 1.0]).reshape(-1,1)
         x_gates = np.concatenate([x.T,y.T,z.T]).T
         self.x_gates = x_gates
         self.s_tag = np.linspace(0,x.shape[0]-1,self.x_gates.shape[0])
