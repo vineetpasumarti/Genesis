@@ -70,16 +70,21 @@ class HoverEnv:
             gate_T = np.array(gate_orientation[0]).flatten()  # Convert DM to numpy array
             gate_quat = Quaternion(matrix=np.column_stack([gate_T, *gate_orientation[1:]])).elements
 
-            # for center gate normals to be aligned with world axes instead of track spline
-            if i in {0, 3, 6}:
-                rot_matrix = np.array([[1, 0, 0],
-                                       [0, 1, 0],
-                                       [0, 0, 1]])
-                gate_quat = Quaternion(matrix=rot_matrix).elements
+            # # for center gate normals to be aligned with world axes instead of track spline
+            # if i in {0, 6}:
+            #     rot_matrix = np.array([[1, 0, 0],
+            #                            [0, 1, 0],
+            #                            [0, 0, 1]])
+            #     gate_quat = Quaternion(matrix=rot_matrix).elements
+            # if i in {3}:
+            #     rot_matrix = np.array([[-1, 0, 0],
+            #                            [0, -1, 0],
+            #                            [0, 0, 1]])
+            #     gate_quat = Quaternion(matrix=rot_matrix).elements
 
             self.scene.add_entity(
                 morph=gs.morphs.Mesh(
-                    file="meshes/gate.obj",
+                    file="meshes/gate_normal.obj",
                     scale=0.4,
                     pos=self.track.x_gates[i],
                     quat=tuple(gate_quat.tolist()),
@@ -312,9 +317,52 @@ class HoverEnv:
         cmd_diff_rew = torch.square(torch.norm(self.actions - self.last_actions, dim=1))
         return cmd_diff_rew
 
+    # def _reward_pass(self):
+    #     passed = torch.zeros(self.num_envs, device=self.device)
+    #     passed[self._at_target()] = 1.0 - torch.norm(self.rel_pos[self._at_target()], dim=1)
+    #     return passed
+
     def _reward_pass(self):
         passed = torch.zeros(self.num_envs, device=self.device)
-        passed[self._at_target()] = 1.0 - torch.norm(self.rel_pos[self._at_target()], dim=1)
+        envs_idx = self._at_target()
+
+        if len(envs_idx) > 0:
+            gate_idx = self.current_gate_idx[envs_idx]
+
+            # Correct rotation matrix extraction (3 columns -> 3x3 matrix)
+            gate_quats = torch.stack([
+                torch.tensor(
+                    np.column_stack([
+                        self.track.get_gate_orientation(idx.item())[0].full().flatten(),  # First column
+                        self.track.get_gate_orientation(idx.item())[1].full().flatten(),  # Second column
+                        self.track.get_gate_orientation(idx.item())[2].full().flatten()  # Third column
+                    ]).flatten(),
+                    device=self.device,
+                    dtype=torch.float32
+                )
+                for idx in gate_idx
+            ])
+
+            # Reshape to proper 3x3 matrices
+            gate_rots = gate_quats.view(-1, 3, 3).transpose(1, 2)
+
+            # Create batched direction vector
+            x_vector = torch.tensor([1, 0, 0], device=self.device, dtype=torch.float32)
+            batched_x = x_vector.repeat(len(envs_idx), 1)
+
+            # Transform normals using matrix multiplication
+            gate_normal = torch.bmm(gate_rots, batched_x.unsqueeze(-1)).squeeze(-1)
+
+            # Velocity projection check
+            rel_vel = self.base_lin_vel[envs_idx]
+            vel_dot_normal = torch.sum(rel_vel * gate_normal, dim=1)
+
+            valid_pass_mask = vel_dot_normal > 0
+            valid_envs = envs_idx[valid_pass_mask]
+
+            if len(valid_envs) > 0:
+                passed[valid_envs] = 1.0 - torch.norm(self.rel_pos[valid_envs], dim=1)
+
         return passed
 
     def _reward_crash(self):
@@ -322,19 +370,19 @@ class HoverEnv:
         crash[self.crash_condition] = -4.0
         return crash
 
-    # def _reward_perception(self):
-    #     # Transform gate direction to body frame
-    #     quat = self.base_quat  # (num_envs, 4)
-    #     gate_dir_world = F.normalize(self.commands - self.base_pos, dim=1)  # Requires F import
-    #     gate_dir_body = transform_by_quat(gate_dir_world, inv_quat(quat))
-    #
-    #     # Camera optical axis in body frame (x-forward)
-    #     camera_forward_body = torch.tensor([1, 0, 1], device=self.device).repeat(self.num_envs, 1)
-    #
-    #     # Angle calculation
-    #     cos_theta = (camera_forward_body * gate_dir_body).sum(dim=1)
-    #     angle = torch.acos(torch.clamp(cos_theta, min=-1.0+1e-6, max=1.0-1e-6))
-    #     return torch.exp(-(angle ** 4))
+    def _reward_perception(self):
+        # Transform gate direction to body frame
+        quat = self.base_quat  # (num_envs, 4)
+        gate_dir_world = F.normalize(self.commands - self.base_pos, dim=1)  # Requires F import
+        gate_dir_body = transform_by_quat(gate_dir_world, inv_quat(quat))
+
+        # Camera optical axis in body frame (x-forward)
+        camera_forward_body = torch.tensor([1, 0, 1], device=self.device).repeat(self.num_envs, 1)
+
+        # Angle calculation
+        cos_theta = (camera_forward_body * gate_dir_body).sum(dim=1)
+        angle = torch.acos(torch.clamp(cos_theta, min=-1.0+1e-6, max=1.0-1e-6))
+        return torch.exp(-(angle ** 4))
 
     # def _reward_target(self):
     #     target_rew = torch.sum(torch.square(self.last_rel_pos), dim=1) - torch.sum(torch.square(self.rel_pos), dim=1)

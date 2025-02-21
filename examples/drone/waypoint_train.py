@@ -106,7 +106,7 @@ def get_cfgs():
             "commands_diff": -0.0002,
             "pass": 1.0,
             "crash": 3.0,
-            # "perception": 0.025,
+            "perception": 0.025,
         },
     }
 
