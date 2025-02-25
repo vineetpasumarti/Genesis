@@ -225,8 +225,11 @@ class HoverEnv:
 
     def _at_target(self):
         # Position threshold check
-        position_mask = torch.norm(self.rel_pos, dim=1) < self.env_cfg["at_target_threshold"]
-
+        position_mask = (
+            (torch.abs(self.rel_pos_gate_frame[:, 0]) < 0.2)
+            & (torch.abs(self.rel_pos_gate_frame[:, 1]) < self.env_cfg["at_target_threshold"])
+            & (torch.abs(self.rel_pos_gate_frame[:, 2]) < self.env_cfg["at_target_threshold"])
+        )
         # Get gate tangent vectors for all environments
         gate_tangents = self.gate_tangents[self.current_target_index]  # [num_envs, 3]
         # Velocity direction check
@@ -238,22 +241,6 @@ class HoverEnv:
         valid_envs = (position_mask & direction_mask).nonzero(as_tuple=False).flatten()
 
         return valid_envs
-
-    def _wrong_dir_at_target(self):
-        # Position threshold check
-        position_mask = torch.norm(self.rel_pos, dim=1) < self.env_cfg["at_target_threshold"]
-
-        # Get gate tangent vectors for all environments
-        gate_tangents = self.gate_tangents[self.current_target_index]  # [num_envs, 3]
-        # Velocity direction check
-        vel_norm = torch.norm(self.base_lin_vel, dim=1, keepdim=True) + 1e-6
-        vel_dir = self.base_lin_vel / vel_norm
-        direction_mask = torch.sum(vel_dir * gate_tangents, dim=1) < 0.0  # [num_envs]
-
-        # Envs with drone at right location but wrong velocity direction
-        wrong_dir_envs = (position_mask & direction_mask).nonzero(as_tuple=False).flatten()
-
-        return wrong_dir_envs
 
     def step(self, actions):
         self.actions = torch.clip(actions, -self.env_cfg["clip_actions"], self.env_cfg["clip_actions"])
@@ -277,21 +264,31 @@ class HoverEnv:
         self.base_lin_vel[:] = transform_by_quat(self.drone.get_vel(), inv_base_quat)
         self.base_ang_vel[:] = transform_by_quat(self.drone.get_ang(), inv_base_quat)
 
+        # Get current gate orientations for all environments
+        gate_quats = self.gate_quaternions[self.current_target_index]  # (num_envs, 4)
+        # Transform rel_pos to gate frame
+        inv_gate_quats = inv_quat(gate_quats)
+        self.rel_pos_gate_frame = transform_by_quat(self.rel_pos, inv_gate_quats)
+
         # resample commands
         envs_idx = self._at_target()
         self._resample_commands(envs_idx)
 
         # check if all targets have been reached
         all_targets_reached = (self.current_target_index == 0).all()
-
         # check termination and reset
         self.crash_condition = (
-            (torch.abs(self.base_euler[:, 1]) > self.env_cfg["termination_if_pitch_greater_than"])
+        (torch.abs(self.base_euler[:, 1]) > self.env_cfg["termination_if_pitch_greater_than"])
             | (torch.abs(self.base_euler[:, 0]) > self.env_cfg["termination_if_roll_greater_than"])
             | (torch.abs(self.rel_pos[:, 0]) > self.env_cfg["termination_if_x_greater_than"])
             | (torch.abs(self.rel_pos[:, 1]) > self.env_cfg["termination_if_y_greater_than"])
             | (torch.abs(self.rel_pos[:, 2]) > self.env_cfg["termination_if_z_greater_than"])
             | (self.base_pos[:, 2] < self.env_cfg["termination_if_close_to_ground"])
+            | (
+                (torch.abs(self.rel_pos_gate_frame[:, 0]) < 0.2)
+                & ((torch.abs(self.rel_pos_gate_frame[:, 1]) >= self.env_cfg["at_target_threshold"])
+                | (torch.abs(self.rel_pos_gate_frame[:, 2]) >= self.env_cfg["at_target_threshold"]))
+            )
         )
         self.reset_buf = (self.episode_length_buf > self.max_episode_length) | self.crash_condition
 
@@ -384,11 +381,6 @@ class HoverEnv:
         passed = torch.zeros(self.num_envs, device=self.device)
         passed[self._at_target()] = 1.0 - torch.norm(self.rel_pos[self._at_target()], dim=1)
         return passed
-
-    def _reward_wrong_dir(self):
-        wrong_dir = torch.zeros(self.num_envs, device=self.device)
-        wrong_dir[self._wrong_dir_at_target()] = -0.5
-        return wrong_dir
 
     def _reward_crash(self):
         crash = torch.zeros(self.num_envs, device=self.device)

@@ -3,7 +3,7 @@ import os
 import pickle
 import wandb
 import torch
-from waypoint_env_racing_eight import HoverEnv
+from waypoint_env_racing_eight_newtarg import HoverEnv
 from rsl_rl.runners import OnPolicyRunner
 import numpy as np
 
@@ -33,7 +33,7 @@ def main():
     # increase the episode length to allow time for reaching all targets
     env_cfg["episode_length_s"] = 45.0  # defaults to 15.0s even without this line
     # # increase threshold for reaching targets
-    # env_cfg["at_target_threshold"] = 0.7
+    # env_cfg["at_target_threshold"] = 0.9
 
     env = HoverEnv(
         num_envs=1,

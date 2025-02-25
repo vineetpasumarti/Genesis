@@ -4,7 +4,7 @@ import pickle
 import shutil
 import wandb
 
-from waypoint_env_racing_eight import HoverEnv
+from waypoint_env_racing_eight_newtarg import HoverEnv
 from rsl_rl.runners import OnPolicyRunner
 
 import genesis as gs
@@ -43,8 +43,8 @@ def get_train_cfg(exp_name, max_iterations):
             "num_steps_per_env": 100,
             "policy_class_name": "ActorCritic",
             "record_interval": -1,
-            "resume": False,
-            "resume_path": None,
+            "resume": True,
+            "resume_path": f"logs/{exp_name}",
             "run_name": "",
             "runner_class_name": "runner_class_name",
             "save_interval": 100,
