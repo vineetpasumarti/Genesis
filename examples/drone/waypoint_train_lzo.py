@@ -4,8 +4,7 @@ import pickle
 import shutil
 import wandb
 
-from waypoint_env_fig_8_singleagent_success import SingleAgentEnv
-from waypoint_env_fig_8_doubleagent import HoverEnv
+from waypoint_env_racing_lzo import HoverEnv
 from rsl_rl.runners import OnPolicyRunner
 
 import genesis as gs
@@ -64,17 +63,14 @@ def get_cfgs():
         "termination_if_roll_greater_than": 180,  # degree
         "termination_if_pitch_greater_than": 180,
         "termination_if_close_to_ground": 0.1,
-        "termination_if_x_greater_than": 25.0,
-        "termination_if_y_greater_than": 25.0,
-        "termination_if_z_greater_than": 25.0,
+        "termination_if_x_greater_than": 50.0,
+        "termination_if_y_greater_than": 50.0,
+        "termination_if_z_greater_than": 50.0,
         # base pose
-        "base_init_pos": [-2.0, -2.0, 1.0],
+        "base_init_pos": [-1.0, -1.0, 1.0],
         "base_init_quat": [1.0, 0.0, 0.0, 0.0],
-        # adversary pose
-        "adv_init_pos": [-1.0, -1.0, 1.0],
-        "adv_init_quat": [1.0, 0.0, 0.0, 0.0],
         "episode_length_s": 15.0,
-        "at_target_threshold": 0.8,
+        "at_target_threshold": 0.7,
         "resampling_time_s": 3.0,
         "simulate_action_latency": True,
         "clip_actions": 1.0,
@@ -95,13 +91,15 @@ def get_cfgs():
     reward_cfg = {
         "yaw_lambda": -10.0,
         "reward_scales": {
-            "progress": 0.5,
-            "commands_lrg": -0.0005,
-            "commands_diff": -0.0002,
-            "pass": 1.0,
-            "crash": 1.0,
-            # "perception": 0.025,
-            # "competition": 0.5,
+            "lin_vel": -0.4,
+            "ang_vel": -0.05,
+            "approaching_goal": 2700.0,
+            "convergence_goal": 0.0,
+            "crash": -1000,
+            "new_goal": 500,
+            "yaw": 0.0,
+            "cmd_smoothness": -1,
+            "cmd_body_rates": 0.0,
         },
     }
 
@@ -119,6 +117,31 @@ def get_cfgs():
         ]
     }
 
+
+    # # traj 1
+    # command_cfg = {
+    #     "num_commands": 3,
+    #     "target_locations": [
+    #         [-1.1, -1.6, 3.6],
+    #         [9.2, 6.6, 1.0],
+    #         [9.2, -4, 1.2],
+    #         [-4.5, -6, 3.5],
+    #         [-4.5, -6, 0.8],
+    #         [4.75, -0.9, 1.2],
+    #         [-2.8, 6.8, 1.2],
+    #         [1.1, -1.6, 3.6]
+    #     ]
+    # }
+
+    # command_cfg = {
+    #     "num_commands": 3,
+    #     "target_locations": [
+    #         [1.0, 0.0, 1.0],
+    #         [0.0, 1.0, 1.5],
+    #         [-1.0, -1.0, 2.0]
+    #     ]
+    # }
+
     return env_cfg, obs_cfg, reward_cfg, command_cfg
 
 
@@ -128,10 +151,6 @@ def main():
     parser.add_argument("-v", "--vis", action="store_true", default=False)
     parser.add_argument("-B", "--num_envs", type=int, default=8192)
     parser.add_argument("--max_iterations", type=int, default=300)
-    parser.add_argument("--adversary_exp_name", type=str, default=None,
-                        help="Experiment name for adversary policy (defaults to exp_name)")
-    parser.add_argument("--adversary_ckpt", type=int, default=300,
-                        help="Checkpoint for adversary drone policy")
     args = parser.parse_args()
 
     gs.init(logging_level="error")
@@ -150,43 +169,15 @@ def main():
     wandb.init(project=f"{args.exp_name}",
                sync_tensorboard=True,)
 
-    # load adversary policy
-    adversary_policy = None
-    if args.adversary_ckpt > 0:
-        adversary_exp_name = args.adversary_exp_name if args.adversary_exp_name else args.exp_name
-        adversary_log_dir = f"logs/{adversary_exp_name}"
-
-        # load configs for adversary
-        adv_env_cfg, adv_obs_cfg, adv_reward_cfg, adv_command_cfg, adv_train_cfg = pickle.load(
-            open(f"{adversary_log_dir}/cfgs.pkl", "rb"))
-
-        # create runner for adversary policy
-        adversary_runner = OnPolicyRunner(SingleAgentEnv(
-            num_envs=1,
-            env_cfg=adv_env_cfg,
-            obs_cfg=adv_obs_cfg,
-            reward_cfg=adv_reward_cfg,
-            command_cfg=adv_command_cfg,
-            show_viewer=False,
-        ), adv_train_cfg, adversary_log_dir, device="cuda:0")
-
-        # load adversary model
-        adversary_resume_path = os.path.join(adversary_log_dir, f"model_{args.adversary_ckpt}.pt")
-        adversary_runner.load(adversary_resume_path)
-
-        # get inference policy
-        adversary_policy = adversary_runner.get_inference_policy(device="cuda:0")
-
-    # Create environment with adversary policy
     env = HoverEnv(
         num_envs=args.num_envs,
         env_cfg=env_cfg,
         obs_cfg=obs_cfg,
         reward_cfg=reward_cfg,
         command_cfg=command_cfg,
-        adversary_policy=adversary_policy,
         show_viewer=args.vis,
     )
+
     runner = OnPolicyRunner(env, train_cfg, log_dir, device="cuda:0")
 
     pickle.dump(
@@ -196,7 +187,7 @@ def main():
 
     runner.learn(num_learning_iterations=args.max_iterations, init_at_random_ep_len=True)
 
-    # log model checkpoints
+    # Log model checkpoints
     wandb.save(os.path.join(log_dir, "*.pt"))
     wandb.save(os.path.join(log_dir, "cfgs.pkl"))
 

@@ -16,7 +16,7 @@ def gs_rand_float(lower, upper, shape, device):
 
 
 class HoverEnv:
-    def __init__(self, num_envs, env_cfg, obs_cfg, reward_cfg, command_cfg, show_viewer=False, device="cuda"):
+    def __init__(self, num_envs, env_cfg, obs_cfg, reward_cfg, command_cfg, adversary_policy=None, show_viewer=False, device="cuda"):
         self.device = torch.device(device)
 
         self.num_envs = num_envs
@@ -41,6 +41,13 @@ class HoverEnv:
         self.gate_positions = self.track.x_gates
         self.current_gate_idx = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.trajectory = self.track.f_xc
+
+        # store the adversary policy
+        self.adversary_policy = adversary_policy
+
+        # add adversary drone initialization parameters
+        self.adversary_init_pos = torch.tensor(self.env_cfg["adv_init_pos"], device=self.device).repeat(self.num_envs, 1)
+        self.adversary_init_quat = torch.tensor(self.env_cfg["adv_init_quat"], device=self.device).repeat(self.num_envs, 1)
 
         # create scene
         self.scene = gs.Scene(
@@ -93,20 +100,20 @@ class HoverEnv:
                 ),
             ),
 
-            # # Add tangent vector visualization sphere
-            # self.tangent = self.scene.add_entity(
-            #     morph=gs.morphs.Mesh(
-            #         file="meshes/sphere.obj",
-            #         scale=0.05,  # Smaller scale for visibility
-            #         fixed=True,
-            #         collision=False,
-            #     ),
-            #     surface=gs.surfaces.Rough(
-            #         diffuse_texture=gs.textures.ColorTexture(
-            #             color=(1.0, 0.0, 0.0)  # Red color for visibility
-            #         ),
-            #     ),
-            # )
+            # Add tangent vector visualization sphere
+            self.tangent = self.scene.add_entity(
+                morph=gs.morphs.Mesh(
+                    file="meshes/sphere.obj",
+                    scale=0.05,  # Smaller scale for visibility
+                    fixed=True,
+                    collision=False,
+                ),
+                surface=gs.surfaces.Rough(
+                    diffuse_texture=gs.textures.ColorTexture(
+                        color=(1.0, 0.0, 0.0)  # Red color for visibility
+                    ),
+                ),
+            )
 
         # add target
         if self.env_cfg["visualize_target"]:
@@ -136,11 +143,14 @@ class HoverEnv:
                 GUI=False,
             )
 
-        # add drone
+        # add ego drone
         self.base_init_pos = torch.tensor(self.env_cfg["base_init_pos"], device=self.device)
         self.base_init_quat = torch.tensor(self.env_cfg["base_init_quat"], device=self.device)
         self.inv_base_init_quat = inv_quat(self.base_init_quat)
         self.drone = self.scene.add_entity(gs.morphs.Drone(file="urdf/drones/cf2x.urdf"))
+
+        # add adversarial drone
+        self.adversary_drone = self.scene.add_entity(gs.morphs.Drone(file="urdf/drones/cf2x.urdf"))
 
         # build scene
         self.scene.build(n_envs=num_envs)
@@ -170,14 +180,26 @@ class HoverEnv:
 
         self.extras = dict()  # extra information for logging
 
+        # initialize adversary buffers if policy is provided
+        if self.adversary_policy is not None:
+            self.adversary_pos = torch.zeros((self.num_envs, 3), device=self.device, dtype=gs.tc_float)
+            self.adversary_quat = torch.zeros((self.num_envs, 4), device=self.device, dtype=gs.tc_float)
+            self.adversary_lin_vel = torch.zeros((self.num_envs, 3), device=self.device, dtype=gs.tc_float)
+            self.adversary_ang_vel = torch.zeros((self.num_envs, 3), device=self.device, dtype=gs.tc_float)
+            self.adversary_actions = torch.zeros((self.num_envs, self.num_actions), device=self.device,
+                                                 dtype=gs.tc_float)
+            self.adversary_last_actions = torch.zeros((self.num_envs, self.num_actions), device=self.device,
+                                                      dtype=gs.tc_float)
+            self.adversary_obs_buf = torch.zeros((self.num_envs, self.num_obs), device=self.device, dtype=gs.tc_float)
+
+            # initialize adversary drone position
+            self.adversary_drone.set_pos(self.adversary_init_pos, zero_velocity=True)
+            self.adversary_drone.set_quat(self.adversary_init_quat, zero_velocity=True)
+
+            # add competition reward
+            self.reward_scales["competition"] = reward_cfg["reward_scales"].get("competition", 0.5) * self.dt
+
         # define target locations
-
-        # self.target_locations = [
-        #     torch.tensor([1.0, 0.0, 1.0], device=self.device),
-        #     torch.tensor([0.0, 1.0, 1.5], device=self.device),
-        #     torch.tensor([-1.0, -1.0, 2.0], device=self.device)
-        # ]
-
         self.target_locations = [
             torch.tensor([0.0, 0.0, 1.0], device=self.device),
             torch.tensor([10.0, 5.0, 1.0], device=self.device),
@@ -225,45 +247,39 @@ class HoverEnv:
 
     def _at_target(self):
         # Position threshold check
-        position_mask = torch.norm(self.rel_pos, dim=1) < self.env_cfg["at_target_threshold"]
+        position_mask = (
+            (self.rel_pos_gate_frame[:, 0] < 0.0)
+            & (torch.abs(self.rel_pos_gate_frame[:, 1]) < self.env_cfg["at_target_threshold"])
+            & (torch.abs(self.rel_pos_gate_frame[:, 2]) < self.env_cfg["at_target_threshold"])
+        )
 
-        # # Get gate tangent vectors for all environments
-        # gate_tangents = self.gate_tangents[self.current_target_index]  # [num_envs, 3]
-        # # Velocity direction check
-        # vel_norm = torch.norm(self.base_lin_vel, dim=1, keepdim=True) + 1e-6
-        # vel_dir = self.base_lin_vel / vel_norm
-        # direction_mask = torch.sum(vel_dir * gate_tangents, dim=1) > 0.0  # [num_envs]
-
-        # Combined validation
         valid_envs = position_mask.nonzero(as_tuple=False).flatten()
 
         return valid_envs
-
-    # def _wrong_dir_at_target(self):
-    #     # Position threshold check
-    #     position_mask = torch.norm(self.rel_pos, dim=1) < self.env_cfg["at_target_threshold"]
-    #
-    #     # Get gate tangent vectors for all environments
-    #     gate_tangents = self.gate_tangents[self.current_target_index]  # [num_envs, 3]
-    #     # Velocity direction check
-    #     vel_norm = torch.norm(self.base_lin_vel, dim=1, keepdim=True) + 1e-6
-    #     vel_dir = self.base_lin_vel / vel_norm
-    #     direction_mask = torch.sum(vel_dir * gate_tangents, dim=1) < 0.0  # [num_envs]
-    #
-    #     # Envs with drone at right location but wrong velocity direction
-    #     wrong_dir_envs = (position_mask & direction_mask).nonzero(as_tuple=False).flatten()
-    #
-    #     return wrong_dir_envs
 
     def step(self, actions):
         self.actions = torch.clip(actions, -self.env_cfg["clip_actions"], self.env_cfg["clip_actions"])
         exec_actions = self.actions
 
-        # 14468 is hover rpm
+        # apply actions to ego drone
         self.drone.set_propellels_rpm((1 + exec_actions * 0.8) * 14468.429183500699)
+
+        # handle adversary drone if policy is provided
+        if self.adversary_policy is not None:
+            # get adversary observations
+            self.adversary_obs_buf = self._get_adversary_observations()
+
+            # get actions from adversary policy
+            with torch.no_grad():
+                self.adversary_actions = self.adversary_policy(self.adversary_obs_buf)
+
+            # apply actions to adversary drone
+            self.adversary_drone.set_propellels_rpm((1 + self.adversary_actions * 0.8) * 14468.429183500699)
+
+        # step the simulation
         self.scene.step()
 
-        # update buffers
+        # update ego drone buffers
         self.episode_length_buf += 1
         self.last_base_pos[:] = self.base_pos[:]
         self.base_pos[:] = self.drone.get_pos()
@@ -276,6 +292,25 @@ class HoverEnv:
         inv_base_quat = inv_quat(self.base_quat)
         self.base_lin_vel[:] = transform_by_quat(self.drone.get_vel(), inv_base_quat)
         self.base_ang_vel[:] = transform_by_quat(self.drone.get_ang(), inv_base_quat)
+
+        # get current gate orientations for all environments
+        gate_quats = self.gate_quaternions[self.current_target_index]  # (num_envs, 4)
+        # transform rel_pos to gate frame
+        inv_gate_quats = inv_quat(gate_quats)
+        self.rel_pos_gate_frame = transform_by_quat(self.rel_pos, inv_gate_quats)
+
+        # update adversary drone buffers if policy is provided
+        if self.adversary_policy is not None:
+            self.adversary_pos[:] = self.adversary_drone.get_pos()
+            self.adversary_quat[:] = self.adversary_drone.get_quat()
+            inv_adversary_quat = inv_quat(self.adversary_quat)
+            self.adversary_lin_vel[:] = transform_by_quat(self.adversary_drone.get_vel(), inv_adversary_quat)
+            self.adversary_ang_vel[:] = transform_by_quat(self.adversary_drone.get_ang(), inv_adversary_quat)
+
+            # # Check for collision with adversary
+            # distance_to_adversary = torch.norm(self.base_pos - self.adversary_pos, dim=1)
+            # collision_threshold = self.env_cfg.get("collision_threshold", 0.3)
+            # collision_with_adversary = distance_to_adversary < collision_threshold
 
         # resample commands
         envs_idx = self._at_target()
@@ -292,6 +327,11 @@ class HoverEnv:
             | (torch.abs(self.rel_pos[:, 1]) > self.env_cfg["termination_if_y_greater_than"])
             | (torch.abs(self.rel_pos[:, 2]) > self.env_cfg["termination_if_z_greater_than"])
             | (self.base_pos[:, 2] < self.env_cfg["termination_if_close_to_ground"])
+            | (
+                ((self.rel_pos_gate_frame[:, 0]) < 0.0)
+                & ((torch.abs(self.rel_pos_gate_frame[:, 1]) >= self.env_cfg["at_target_threshold"])
+                | (torch.abs(self.rel_pos_gate_frame[:, 2]) >= self.env_cfg["at_target_threshold"]))
+            )
         )
         self.reset_buf = (self.episode_length_buf > self.max_episode_length) | self.crash_condition
 
@@ -311,7 +351,7 @@ class HoverEnv:
         # compute observations
         self.obs_buf = torch.cat(
             [
-                torch.clip(self.rel_pos * self.obs_scales["rel_pos"], -1, 1),
+                torch.clip(self.rel_pos_gate_frame * self.obs_scales["rel_pos"], -1, 1),
                 self.base_quat,
                 torch.clip(self.base_lin_vel * self.obs_scales["lin_vel"], -1, 1),
                 torch.clip(self.base_ang_vel * self.obs_scales["ang_vel"], -1, 1),
@@ -321,6 +361,11 @@ class HoverEnv:
         )
 
         self.last_actions[:] = self.actions[:]
+        self.adversary_last_actions[:] = self.adversary_actions[:]
+
+        # print(f"rel_pos: {self.rel_pos}")
+        # print(f"rel_pos_gate_frame: {self.rel_pos_gate_frame}")
+        # print(self._reward_pass())
 
         return self.obs_buf, None, self.rew_buf, self.reset_buf, self.extras
 
@@ -329,6 +374,26 @@ class HoverEnv:
 
     def get_privileged_observations(self):
         return None
+
+    def _get_adversary_observations(self):
+        # Similar to ego observations but from adversary's perspective
+        rel_pos = self.commands - self.adversary_pos
+
+        # Get current gate orientations for all environments
+        gate_quats = self.gate_quaternions[self.current_target_index]
+
+        # Transform rel_pos to gate frame
+        inv_gate_quats = inv_quat(gate_quats)
+        rel_pos_gate_frame = transform_by_quat(rel_pos, inv_gate_quats)
+
+        # Concatenate observations (same structure as ego observations)
+        return torch.cat([
+            torch.clip(rel_pos_gate_frame * self.obs_scales["rel_pos"], -1, 1),
+            self.adversary_quat,
+            torch.clip(self.adversary_lin_vel * self.obs_scales["lin_vel"], -1, 1),
+            torch.clip(self.adversary_ang_vel * self.obs_scales["ang_vel"], -1, 1),
+            self.adversary_last_actions,
+        ], axis=-1)
 
     def reset_idx(self, envs_idx):
         if len(envs_idx) == 0:
@@ -350,6 +415,18 @@ class HoverEnv:
         self.last_actions[envs_idx] = 0.0
         self.episode_length_buf[envs_idx] = 0
         self.reset_buf[envs_idx] = True
+
+        # reset adversary drone if policy is provided
+        if self.adversary_policy is not None:
+            self.adversary_pos[envs_idx] = self.adversary_init_pos[envs_idx]
+            self.adversary_quat[envs_idx] = self.adversary_init_quat[envs_idx]
+            self.adversary_drone.set_pos(self.adversary_pos[envs_idx], zero_velocity=True, envs_idx=envs_idx)
+            self.adversary_drone.set_quat(self.adversary_quat[envs_idx], zero_velocity=True, envs_idx=envs_idx)
+            self.adversary_lin_vel[envs_idx] = 0
+            self.adversary_ang_vel[envs_idx] = 0
+            self.adversary_drone.zero_all_dofs_velocity(envs_idx)
+            self.adversary_actions[envs_idx] = 0.0
+            self.adversary_last_actions[envs_idx] = 0.0
 
         # fill extras
         self.extras["episode"] = {}
@@ -382,48 +459,60 @@ class HoverEnv:
 
     def _reward_pass(self):
         passed = torch.zeros(self.num_envs, device=self.device)
-        passed[self._at_target()] = 1.0 - torch.norm(self.rel_pos[self._at_target()], dim=1)
+        passed[self._at_target()] = 1.0 - torch.norm(self.rel_pos_gate_frame[self._at_target()], dim=1)
         return passed
 
     def _reward_crash(self):
         crash = torch.zeros(self.num_envs, device=self.device)
-        crash[self.crash_condition] = -4.0
+        crash[self.crash_condition] = -5.0
         return crash
 
-    def _reward_perception(self):
-        # Transform gate direction to body frame
-        quat = self.base_quat  # (num_envs, 4)
-        gate_dir_world = F.normalize(self.commands - self.base_pos, dim=1)  # Requires F import
-        gate_dir_body = transform_by_quat(gate_dir_world, inv_quat(quat))
-
-        # Camera optical axis in body frame (x-forward)
-        camera_forward_body = torch.tensor([1, 0, 1], device=self.device).repeat(self.num_envs, 1)
-
-        # Angle calculation
-        cos_theta = (camera_forward_body * gate_dir_body).sum(dim=1)
-        angle = torch.acos(torch.clamp(cos_theta, min=-1.0+1e-6, max=1.0-1e-6))
-        return torch.exp(-(angle ** 4))
-
-    # def _reward_target(self):
-    #     target_rew = torch.sum(torch.square(self.last_rel_pos), dim=1) - torch.sum(torch.square(self.rel_pos), dim=1)
-    #     return target_rew
+    # def _reward_perception(self):
+    #     # Transform gate direction to body frame
+    #     quat = self.base_quat  # (num_envs, 4)
+    #     gate_dir_world = F.normalize(self.commands - self.base_pos, dim=1)  # Requires F import
+    #     gate_dir_body = transform_by_quat(gate_dir_world, inv_quat(quat))
     #
-    # def _reward_smooth(self):
-    #     smooth_rew = torch.sum(torch.square(self.actions - self.last_actions), dim=1)
-    #     return smooth_rew
+    #     # Camera optical axis in body frame (x-forward)
+    #     camera_forward_body = torch.tensor([1, 0, 1], device=self.device).repeat(self.num_envs, 1)
     #
-    # def _reward_yaw(self):
-    #     yaw = self.base_euler[:, 2]
-    #     yaw = torch.where(yaw > 180, yaw - 360, yaw) / 180 * 3.14159  # use rad for yaw_reward
-    #     yaw_rew = torch.exp(self.reward_cfg["yaw_lambda"] * torch.abs(yaw))
-    #     return yaw_rew
-    #
-    # def _reward_angular(self):
-    #     angular_rew = torch.norm(self.base_ang_vel / 3.14159, dim=1)
-    #     return angular_rew
-    #
-    # def _reward_crash(self):
-    #     crash_rew = torch.zeros((self.num_envs,), device=self.device, dtype=gs.tc_float)
-    #     crash_rew[self.crash_condition] = 1
-    #     return crash_rew
+    #     # Angle calculation
+    #     cos_theta = (camera_forward_body * gate_dir_body).sum(dim=1)
+    #     angle = torch.acos(torch.clamp(cos_theta, min=-1.0+1e-6, max=1.0-1e-6))
+    #     return torch.exp(-(angle ** 4))
 
+    # def _reward_competition(self):
+    #     if self.adversary_policy is None:
+    #         return torch.zeros(self.num_envs, device=self.device)
+    #
+    #     # Calculate how far each drone has progressed through the track
+    #     ego_gate_dists = torch.norm(self.base_pos.unsqueeze(1) -
+    #                                 torch.tensor(self.gate_positions, device=self.device), dim=2)
+    #     adv_gate_dists = torch.norm(self.adversary_pos.unsqueeze(1) -
+    #                                 torch.tensor(self.gate_positions, device=self.device), dim=2)
+    #
+    #     # Find closest gate for each drone
+    #     ego_closest_gate = torch.argmin(ego_gate_dists, dim=1)
+    #     adv_closest_gate = torch.argmin(adv_gate_dists, dim=1)
+    #
+    #     # Reward for being at a later gate than adversary
+    #     gate_advantage = (ego_closest_gate - adv_closest_gate).float()
+    #
+    #     # For same gate, reward for being closer to next gate
+    #     same_gate_mask = (ego_closest_gate == adv_closest_gate)
+    #     next_gate = (ego_closest_gate + 1) % self.track.NumOfGates
+    #
+    #     next_gate_pos = torch.tensor(np.array([self.gate_positions[i.item()]
+    #                                            for i in next_gate]), device=self.device)
+    #
+    #     ego_next_dist = torch.norm(self.base_pos - next_gate_pos, dim=1)
+    #     adv_next_dist = torch.norm(self.adversary_pos - next_gate_pos, dim=1)
+    #
+    #     # Lower distance is better
+    #     dist_advantage = (adv_next_dist - ego_next_dist) / 10.0  # Normalize
+    #
+    #     # Combine both advantages
+    #     competition_reward = gate_advantage.clone()
+    #     competition_reward[same_gate_mask] = dist_advantage[same_gate_mask]
+    #
+    #     return torch.tanh(competition_reward)  # Scale to [-1, 1]

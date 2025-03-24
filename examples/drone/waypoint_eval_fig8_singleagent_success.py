@@ -3,7 +3,7 @@ import os
 import pickle
 import wandb
 import torch
-from waypoint_env_fig_8_doubleagent import HoverEnv
+from waypoint_env_fig_8_singleagent_success import SingleAgentEnv
 from rsl_rl.runners import OnPolicyRunner
 import numpy as np
 
@@ -15,10 +15,6 @@ def main():
     parser.add_argument("-e", "--exp_name", type=str, default="drone-hovering")
     parser.add_argument("--ckpt", type=int, default=300)
     parser.add_argument("--record", action="store_true", default=False)
-    parser.add_argument("--adversary_exp_name", type=str, default=None,
-                        help="Experiment name for adversary policy (defaults to exp_name)")
-    parser.add_argument("--adversary_ckpt", type=int, default=300,
-                        help="Checkpoint for adversary drone policy")
     args = parser.parse_args()
 
     gs.init()
@@ -39,41 +35,12 @@ def main():
     # # increase threshold for reaching targets
     # env_cfg["at_target_threshold"] = 0.9
 
-    # load adversary policy
-    adversary_policy = None
-    if args.adversary_ckpt > 0:
-        adversary_exp_name = args.adversary_exp_name if args.adversary_exp_name else args.exp_name
-        adversary_log_dir = f"logs/{adversary_exp_name}"
-
-        # load configs for adversary
-        adv_env_cfg, adv_obs_cfg, adv_reward_cfg, adv_command_cfg, adv_train_cfg = pickle.load(
-            open(f"{adversary_log_dir}/cfgs.pkl", "rb"))
-
-        # create runner for adversary policy
-        adversary_runner = OnPolicyRunner(HoverEnv(
-            num_envs=1,
-            env_cfg=adv_env_cfg,
-            obs_cfg=adv_obs_cfg,
-            reward_cfg=adv_reward_cfg,
-            command_cfg=adv_command_cfg,
-            show_viewer=False,
-        ), adv_train_cfg, adversary_log_dir, device="cuda:0")
-
-        # load adversary model exactly like in waypoint_eval
-        adversary_resume_path = os.path.join(adversary_log_dir, f"model_{args.adversary_ckpt}.pt")
-        adversary_runner.load(adversary_resume_path)
-
-        # get inference policy
-        adversary_policy = adversary_runner.get_inference_policy(device="cuda:0")
-
-    # create environment with adversary policy
-    env = HoverEnv(
+    env = SingleAgentEnv(
         num_envs=1,
         env_cfg=env_cfg,
         obs_cfg=obs_cfg,
         reward_cfg=reward_cfg,
         command_cfg=command_cfg,
-        adversary_policy=adversary_policy,
         show_viewer=True,
     )
 

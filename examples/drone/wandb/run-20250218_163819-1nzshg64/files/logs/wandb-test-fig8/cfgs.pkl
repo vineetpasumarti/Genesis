@@ -1,0 +1,1 @@
+/home/vineet/PycharmProjects/Genesis/examples/drone/logs/wandb-test-fig8/cfgs.pkl

@@ -225,35 +225,22 @@ class HoverEnv:
 
     def _at_target(self):
         # Position threshold check
-        position_mask = torch.norm(self.rel_pos, dim=1) < self.env_cfg["at_target_threshold"]
-
-        # # Get gate tangent vectors for all environments
-        # gate_tangents = self.gate_tangents[self.current_target_index]  # [num_envs, 3]
-        # # Velocity direction check
-        # vel_norm = torch.norm(self.base_lin_vel, dim=1, keepdim=True) + 1e-6
-        # vel_dir = self.base_lin_vel / vel_norm
-        # direction_mask = torch.sum(vel_dir * gate_tangents, dim=1) > 0.0  # [num_envs]
+        position_mask = (
+            (torch.abs(self.rel_pos_gate_frame[:, 0]) < 0.2)
+            & (torch.abs(self.rel_pos_gate_frame[:, 1]) < self.env_cfg["at_target_threshold"])
+            & (torch.abs(self.rel_pos_gate_frame[:, 2]) < self.env_cfg["at_target_threshold"])
+        )
+        # Get gate tangent vectors for all environments
+        gate_tangents = self.gate_tangents[self.current_target_index]  # [num_envs, 3]
+        # Velocity direction check
+        vel_norm = torch.norm(self.base_lin_vel, dim=1, keepdim=True) + 1e-6
+        vel_dir = self.base_lin_vel / vel_norm
+        direction_mask = torch.sum(vel_dir * gate_tangents, dim=1) > 0.0  # [num_envs]
 
         # Combined validation
-        valid_envs = position_mask.nonzero(as_tuple=False).flatten()
+        valid_envs = (position_mask & direction_mask).nonzero(as_tuple=False).flatten()
 
         return valid_envs
-
-    # def _wrong_dir_at_target(self):
-    #     # Position threshold check
-    #     position_mask = torch.norm(self.rel_pos, dim=1) < self.env_cfg["at_target_threshold"]
-    #
-    #     # Get gate tangent vectors for all environments
-    #     gate_tangents = self.gate_tangents[self.current_target_index]  # [num_envs, 3]
-    #     # Velocity direction check
-    #     vel_norm = torch.norm(self.base_lin_vel, dim=1, keepdim=True) + 1e-6
-    #     vel_dir = self.base_lin_vel / vel_norm
-    #     direction_mask = torch.sum(vel_dir * gate_tangents, dim=1) < 0.0  # [num_envs]
-    #
-    #     # Envs with drone at right location but wrong velocity direction
-    #     wrong_dir_envs = (position_mask & direction_mask).nonzero(as_tuple=False).flatten()
-    #
-    #     return wrong_dir_envs
 
     def step(self, actions):
         self.actions = torch.clip(actions, -self.env_cfg["clip_actions"], self.env_cfg["clip_actions"])
@@ -277,21 +264,37 @@ class HoverEnv:
         self.base_lin_vel[:] = transform_by_quat(self.drone.get_vel(), inv_base_quat)
         self.base_ang_vel[:] = transform_by_quat(self.drone.get_ang(), inv_base_quat)
 
+        # Get current gate orientations for all environments
+        gate_quats = self.gate_quaternions[self.current_target_index]  # (num_envs, 4)
+        # Transform rel_pos to gate frame
+        inv_gate_quats = inv_quat(gate_quats)
+        self.rel_pos_gate_frame = transform_by_quat(self.rel_pos, inv_gate_quats)
+
         # resample commands
         envs_idx = self._at_target()
         self._resample_commands(envs_idx)
 
         # check if all targets have been reached
         all_targets_reached = (self.current_target_index == 0).all()
-
         # check termination and reset
         self.crash_condition = (
-            (torch.abs(self.base_euler[:, 1]) > self.env_cfg["termination_if_pitch_greater_than"])
+        (torch.abs(self.base_euler[:, 1]) > self.env_cfg["termination_if_pitch_greater_than"])
             | (torch.abs(self.base_euler[:, 0]) > self.env_cfg["termination_if_roll_greater_than"])
             | (torch.abs(self.rel_pos[:, 0]) > self.env_cfg["termination_if_x_greater_than"])
             | (torch.abs(self.rel_pos[:, 1]) > self.env_cfg["termination_if_y_greater_than"])
             | (torch.abs(self.rel_pos[:, 2]) > self.env_cfg["termination_if_z_greater_than"])
             | (self.base_pos[:, 2] < self.env_cfg["termination_if_close_to_ground"])
+            | (
+                (torch.abs(self.rel_pos_gate_frame[:, 0]) < 0.1)
+                & (
+                        (torch.abs(self.rel_pos_gate_frame[:, 1]) >= self.env_cfg["at_target_threshold"])
+                        & (torch.abs(self.rel_pos_gate_frame[:, 1]) < self.env_cfg["at_target_threshold"] + 0.5)
+                        | (
+                            (torch.abs(self.rel_pos_gate_frame[:, 2]) >= self.env_cfg["at_target_threshold"])
+                            & (torch.abs(self.rel_pos_gate_frame[:, 2]) < self.env_cfg["at_target_threshold"] + 0.5)
+                        )
+                )
+            )
         )
         self.reset_buf = (self.episode_length_buf > self.max_episode_length) | self.crash_condition
 
@@ -368,62 +371,48 @@ class HoverEnv:
         return self.obs_buf, None
 
     # ------------ reward functions----------------
-    def _reward_progress(self):
-        progress_rew = self.last_rel_pos.norm(dim=1) - self.rel_pos.norm(dim=1)
-        return progress_rew
+    def _reward_lin_vel(self):
+        """Penalize high linear velocity for better control."""
+        return torch.sum(torch.square(self.base_lin_vel), dim=1)
 
-    def _reward_commands_lrg(self):
-        cmd_lrg_rew = torch.norm(self.actions, dim=1)
-        return cmd_lrg_rew
+    def _reward_ang_vel(self):
+        """Penalize high angular velocity for smoother rotations."""
+        return torch.sum(torch.square(self.base_ang_vel), dim=1)
 
-    def _reward_commands_diff(self):
-        cmd_diff_rew = torch.square(torch.norm(self.actions - self.last_actions, dim=1))
-        return cmd_diff_rew
+    def _reward_approaching_goal(self):
+        """Reward progress towards current gate."""
+        current_dist = torch.norm(self.rel_pos, dim=1)
+        last_dist = torch.norm(self.last_rel_pos, dim=1)
+        return torch.relu(last_dist - current_dist)
 
-    def _reward_pass(self):
-        passed = torch.zeros(self.num_envs, device=self.device)
-        passed[self._at_target()] = 1.0 - torch.norm(self.rel_pos[self._at_target()], dim=1)
-        return passed
+    def _reward_convergence_goal(self):
+        """Reward proximity to gate center using gate-local coords."""
+        k = 2 * self.env_cfg["at_target_threshold"] / torch.log(torch.tensor(2.0 / 0.01 - 1))
+        return 1.0 - torch.tanh(torch.norm(self.rel_pos_gate_frame, dim=1) / k)
+
+    def _reward_new_goal(self):
+        """Reward successful gate passages."""
+        passed_envs = self._at_target()
+        reward = torch.zeros(self.num_envs, device=self.device)
+        reward[passed_envs] = 1.0
+        return reward
 
     def _reward_crash(self):
         crash = torch.zeros(self.num_envs, device=self.device)
-        crash[self.crash_condition] = -4.0
+        crash[self.crash_condition] = 1.0
         return crash
 
-    def _reward_perception(self):
-        # Transform gate direction to body frame
-        quat = self.base_quat  # (num_envs, 4)
-        gate_dir_world = F.normalize(self.commands - self.base_pos, dim=1)  # Requires F import
-        gate_dir_body = transform_by_quat(gate_dir_world, inv_quat(quat))
+    def _reward_yaw(self):
+        """Penalize yaw misalignment with gate."""
+        gate_quats = self.gate_quaternions[self.current_target_index]
+        drone_quats = transform_quat_by_quat(self.base_quat, inv_quat(gate_quats))
+        yaw = quat_to_xyz(drone_quats)[:, 2]
+        return torch.exp(-10.0 * torch.abs(yaw))
 
-        # Camera optical axis in body frame (x-forward)
-        camera_forward_body = torch.tensor([1, 0, 1], device=self.device).repeat(self.num_envs, 1)
+    def _reward_cmd_smoothness(self):
+        """Penalize abrupt control changes."""
+        return torch.sum(torch.square(self.actions - self.last_actions), dim=1)
 
-        # Angle calculation
-        cos_theta = (camera_forward_body * gate_dir_body).sum(dim=1)
-        angle = torch.acos(torch.clamp(cos_theta, min=-1.0+1e-6, max=1.0-1e-6))
-        return torch.exp(-(angle ** 4))
-
-    # def _reward_target(self):
-    #     target_rew = torch.sum(torch.square(self.last_rel_pos), dim=1) - torch.sum(torch.square(self.rel_pos), dim=1)
-    #     return target_rew
-    #
-    # def _reward_smooth(self):
-    #     smooth_rew = torch.sum(torch.square(self.actions - self.last_actions), dim=1)
-    #     return smooth_rew
-    #
-    # def _reward_yaw(self):
-    #     yaw = self.base_euler[:, 2]
-    #     yaw = torch.where(yaw > 180, yaw - 360, yaw) / 180 * 3.14159  # use rad for yaw_reward
-    #     yaw_rew = torch.exp(self.reward_cfg["yaw_lambda"] * torch.abs(yaw))
-    #     return yaw_rew
-    #
-    # def _reward_angular(self):
-    #     angular_rew = torch.norm(self.base_ang_vel / 3.14159, dim=1)
-    #     return angular_rew
-    #
-    # def _reward_crash(self):
-    #     crash_rew = torch.zeros((self.num_envs,), device=self.device, dtype=gs.tc_float)
-    #     crash_rew[self.crash_condition] = 1
-    #     return crash_rew
-
+    def _reward_cmd_body_rates(self):
+        """Penalize high body rate commands."""
+        return torch.sum(torch.square(self.actions[:, 1:]), dim=1)
