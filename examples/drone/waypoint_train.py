@@ -177,7 +177,7 @@ def main():
         # get inference policy
         adversary_policy = adversary_runner.get_inference_policy(device="cuda:0")
 
-    # Create environment with adversary policy
+    # create environment with adversary policy
     env = HoverEnv(
         num_envs=args.num_envs,
         env_cfg=env_cfg,

@@ -36,8 +36,6 @@ def main():
     env_cfg["max_visualize_FPS"] = 60
     # increase the episode length to allow time for reaching all targets
     env_cfg["episode_length_s"] = 45.0  # defaults to 15.0s even without this line
-    # # increase threshold for reaching targets
-    # env_cfg["at_target_threshold"] = 0.9
 
     # load adversary policy
     adversary_policy = None
@@ -59,7 +57,7 @@ def main():
             show_viewer=False,
         ), adv_train_cfg, adversary_log_dir, device="cuda:0")
 
-        # load adversary model exactly like in waypoint_eval
+        # load adversary model exactly like in waypoint_eval from single agent
         adversary_resume_path = os.path.join(adversary_log_dir, f"model_{args.adversary_ckpt}.pt")
         adversary_runner.load(adversary_resume_path)
 
@@ -101,7 +99,7 @@ def main():
     if args.record:
         env.cam.start_recording()
 
-        # Capture frames
+        # capture frames
         frames = []
         for _ in range(max_sim_step):
             # Existing code
@@ -111,7 +109,7 @@ def main():
             frame = env.cam.get_rgb()
             frames.append(frame)
 
-        # Log as video
+        # log as video
         wandb.log({
             "eval_video": wandb.Video(
                 np.array(frames),

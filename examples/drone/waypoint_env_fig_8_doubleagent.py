@@ -58,7 +58,7 @@ class HoverEnv:
                 camera_lookat=(3, 1, 1),
                 camera_fov=40,
             ),
-            vis_options=gs.options.VisOptions(n_rendered_envs=10),
+            vis_options=gs.options.VisOptions(n_rendered_envs=1),
             rigid_options=gs.options.RigidOptions(
                 dt=self.dt,
                 constraint_solver=gs.constraint_solver.Newton,
@@ -234,19 +234,19 @@ class HoverEnv:
             self.gate_quaternions[i] = torch.tensor(gate_quat, device=self.device)
 
     def _resample_commands(self, envs_idx):
-        # 1. Convert target_locations to pre-stacked tensor
-        target_tensor = torch.stack(self.target_locations)  # Add this line during initialization
+        # 1. convert target_locations to pre-stacked tensor
+        target_tensor = torch.stack(self.target_locations)
 
-        # 2. Use PRE-increment logic
+        # 2. use PRE-increment logic
         new_indices = (self.current_target_index[envs_idx] + 1) % len(self.target_locations)
-        self.commands[envs_idx] = target_tensor[new_indices]  # Direct tensor indexing
-        self.current_target_index[envs_idx] = new_indices  # Update AFTER assignment
+        self.commands[envs_idx] = target_tensor[new_indices]  # direct tensor indexing
+        self.current_target_index[envs_idx] = new_indices  # update AFTER assignment
 
         if self.target is not None:
             self.target.set_pos(self.commands[envs_idx], zero_velocity=True, envs_idx=envs_idx)
 
     def _at_target(self):
-        # Position threshold check
+        # position threshold check
         position_mask = (
             (self.rel_pos_gate_frame[:, 0] < 0.0)
             & (torch.abs(self.rel_pos_gate_frame[:, 1]) < self.env_cfg["at_target_threshold"])
@@ -307,11 +307,6 @@ class HoverEnv:
             self.adversary_lin_vel[:] = transform_by_quat(self.adversary_drone.get_vel(), inv_adversary_quat)
             self.adversary_ang_vel[:] = transform_by_quat(self.adversary_drone.get_ang(), inv_adversary_quat)
 
-            # # Check for collision with adversary
-            # distance_to_adversary = torch.norm(self.base_pos - self.adversary_pos, dim=1)
-            # collision_threshold = self.env_cfg.get("collision_threshold", 0.3)
-            # collision_with_adversary = distance_to_adversary < collision_threshold
-
         # resample commands
         envs_idx = self._at_target()
         self._resample_commands(envs_idx)
@@ -327,6 +322,7 @@ class HoverEnv:
             | (torch.abs(self.rel_pos[:, 1]) > self.env_cfg["termination_if_y_greater_than"])
             | (torch.abs(self.rel_pos[:, 2]) > self.env_cfg["termination_if_z_greater_than"])
             | (self.base_pos[:, 2] < self.env_cfg["termination_if_close_to_ground"])
+            | (torch.norm(self.base_pos - self.adversary_pos, dim=1) < self.env_cfg.get("collision_threshold", 0.3))
             | (
                 ((self.rel_pos_gate_frame[:, 0]) < 0.0)
                 & ((torch.abs(self.rel_pos_gate_frame[:, 1]) >= self.env_cfg["at_target_threshold"])
@@ -376,17 +372,17 @@ class HoverEnv:
         return None
 
     def _get_adversary_observations(self):
-        # Similar to ego observations but from adversary's perspective
+        # similar to ego observations but from adversary's perspective
         rel_pos = self.commands - self.adversary_pos
 
-        # Get current gate orientations for all environments
+        # get current gate orientations for all environments
         gate_quats = self.gate_quaternions[self.current_target_index]
 
-        # Transform rel_pos to gate frame
+        # transform rel_pos to gate frame
         inv_gate_quats = inv_quat(gate_quats)
         rel_pos_gate_frame = transform_by_quat(rel_pos, inv_gate_quats)
 
-        # Concatenate observations (same structure as ego observations)
+        # concatenate observations (same structure as ego observations)
         return torch.cat([
             torch.clip(rel_pos_gate_frame * self.obs_scales["rel_pos"], -1, 1),
             self.adversary_quat,
